@@ -45,7 +45,7 @@ def init_gspread():
     return client
 
 gc = init_gspread()
-sheet = gc.open("ERICA5").sheet1 # ตรวจสอบชื่อ Google Sheet ให้ถูกต้อง
+sheet = gc.open("Erica-05 Update 15-04-2026").sheet1 # ตรวจสอบชื่อ Google Sheet ให้ถูกต้อง
 
 sheet_queue = asyncio.Queue()
 
