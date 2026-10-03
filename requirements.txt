@@ -1,3 +1,5 @@
 discord.py
 flask
 gunicorn
+gspread
+google-auth
