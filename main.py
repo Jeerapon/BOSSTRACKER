@@ -39,7 +39,6 @@ def _get_worksheets_sync():
             
     client = gspread.authorize(creds)
     
-    # เปิดสเปรดชีตตามชื่อ หากไม่พบให้ลองค้นหาด้วย ID
     try:
         spreadsheet = client.open(SHEET_NAME)
     except gspread.exceptions.SpreadsheetNotFound:
@@ -282,17 +281,15 @@ async def generate_score_report_embed():
     return await asyncio.to_thread(_generate_score_report_sync)
 
 # ---------------------------------------------------------
-# ⏰ 4. Timer Loop & Normal Boss Alert ( FIXED TIMEZONE & LOOP )
+# ⏰ 4. Timer Loop & Normal Boss Alert ( HIGH ACCURACY - 20s )
 # ---------------------------------------------------------
-@tasks.loop(minutes=1)
+@tasks.loop(seconds=20)
 async def check_boss_timers():
     await bot.wait_until_ready()
-    await refresh_main_table()
 
     NOTIFICATION_CHANNEL_ID = 1505457051143241849 
     channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
     if not channel:
-        print(f"⚠️ Channel ID {NOTIFICATION_CHANNEL_ID} not found.")
         return
 
     try:
@@ -300,7 +297,6 @@ async def check_boss_timers():
         all_records = await asyncio.to_thread(sheet_main.get_all_records)
         
         now_thai = datetime.now(THAI_TZ)
-        current_hm = now_thai.strftime("%H:%M")
         current_date_str = now_thai.strftime("%Y-%m-%d")
 
         for row in all_records:
@@ -313,36 +309,38 @@ async def check_boss_timers():
                 continue
 
             try:
-                # สกัดสติงหาเวลา HH:MM
-                time_parts = boss_up.split(" ")[-1].split(":")
-                if len(time_parts) >= 2:
-                    boss_hm = f"{int(time_parts[0]):02d}:{int(time_parts[1]):02d}"
-                else:
-                    continue
+                # ดึงเวลาเฉพาะ HH:MM
+                time_str = boss_up.split(" ")[-1][:5]
+                b_hour, b_min = map(int, time_str.split(":"))
+                
+                boss_dt = now_thai.replace(hour=b_hour, minute=b_min, second=0, microsecond=0)
+                if boss_dt < now_thai - timedelta(minutes=10):
+                    boss_dt += timedelta(days=1)
 
-                boss_dt = datetime.strptime(boss_hm, "%H:%M")
-                alert_dt = boss_dt - timedelta(minutes=1)
-                alert_hm = alert_dt.strftime("%H:%M")
+                # คำนวณความต่างของเวลาเป็นวินาที
+                diff_seconds = (boss_dt - now_thai).total_seconds()
 
-                stage_key = f"{boss_up}_{current_date_str}_{boss_hm}"
+                # แจ้งเตือนเมื่อบอสจะเกิดในอีก 0 ถึง 90 วินาที (ล่วงหน้าประมาณ 1 นาที)
+                if 0 <= diff_seconds <= 90:
+                    stage_key = f"{boss_up}_{current_date_str}_{time_str}"
 
-                if current_hm == alert_hm and notified_bosses.get(name) != stage_key:
-                    notified_bosses[name] = stage_key
-                    claim_status[name] = True
+                    if notified_bosses.get(name) != stage_key:
+                        notified_bosses[name] = stage_key
+                        claim_status[name] = True
 
-                    alert_embed = discord.Embed(
-                        title=f"⚔️ {name} ({rate}) will spawn in 1 minute!", 
-                        color=discord.Color.red()
-                    )
-                    alert_embed.add_field(name="📅 Date", value=f"`{current_date_str}`", inline=True)
-                    alert_embed.add_field(name="⏱️ Start Time", value=f"`{boss_hm}`", inline=True)
-                    alert_embed.add_field(name="💎 Spawn Rate", value=f"`{rate}`", inline=True)
-                    alert_embed.add_field(name="🏆 Boss Point", value=f"`{point_val} pts`", inline=True)
-                    alert_embed.set_footer(text="🎯 Position at spawn point and click 'Claim Point' upon defeating the boss!")
+                        alert_embed = discord.Embed(
+                            title=f"⚔️ {name} ({rate}) will spawn in 1 minute!", 
+                            color=discord.Color.red()
+                        )
+                        alert_embed.add_field(name="📅 Date", value=f"`{current_date_str}`", inline=True)
+                        alert_embed.add_field(name="⏱️ Start Time", value=f"`{time_str}`", inline=True)
+                        alert_embed.add_field(name="💎 Spawn Rate", value=f"`{rate}`", inline=True)
+                        alert_embed.add_field(name="🏆 Boss Point", value=f"`{point_val} pts`", inline=True)
+                        alert_embed.set_footer(text="🎯 Position at spawn point and click 'Claim Point' upon defeating the boss!")
 
-                    view = BossControlView(boss_name=name)
-                    await channel.send(content="@everyone", embed=alert_embed, view=view)
-                    print(f"✅ Alert sent for {name} (Spawn at {boss_hm}) at {current_hm} Thai Time")
+                        view = BossControlView(boss_name=name)
+                        await channel.send(content="@everyone", embed=alert_embed, view=view)
+                        print(f"✅ Alert sent for {name} (Spawn at {time_str})")
 
             except Exception as parse_err:
                 continue
@@ -388,7 +386,7 @@ class ConfirmClaimModal(ui.Modal, title="Confirm Boss Point Claim"):
         for rec in score_records:
             if str(rec.get("USER ID")) == user_id and str(rec.get("BOSS NAME")).lower() == self.boss_name.lower():
                 if str(rec.get("DATE")) == today_str:
-                    await interaction.followup.send("⚠️ You have already claimed points for this boss spawn cycle!", ephemeral=True)
+                    await interaction.followup.send("⚠️️ You have already claimed points for this boss spawn cycle!", ephemeral=True)
                     return
 
         date_str = now.strftime("%Y-%m-%d")
@@ -406,7 +404,7 @@ class ConfirmClaimModal(ui.Modal, title="Confirm Boss Point Claim"):
 
         confirm_embed = discord.Embed(title="⏳ Boss Point Claim Queued!", color=discord.Color.blue())
         confirm_embed.add_field(name="👤 User", value=f"`{display_name}`", inline=True)
-        confirm_embed.add_field(name="⚔️️ Boss Name", value=f"`{self.boss_name}`", inline=True)
+        confirm_embed.add_field(name="⚔️ Boss Name", value=f"`{self.boss_name}`", inline=True)
         confirm_embed.add_field(name="💎 Points Claimed", value=f"`+{score_num} pts`", inline=True)
         confirm_embed.set_footer(text="Your claim has been queued and will be saved to Google Sheets shortly.")
         
@@ -505,7 +503,7 @@ class EventBossControlView(ui.View):
         for rec in score_records:
             if str(rec.get("USER ID")) == user_id and str(rec.get("BOSS NAME")).lower() == self.boss_name.lower():
                 if str(rec.get("DATE")) == today_str:
-                    await interaction.followup.send("⚠️ You have already claimed points for this Event Boss!", ephemeral=True)
+                    await interaction.followup.send("⚠️️ You have already claimed points for this Event Boss!", ephemeral=True)
                     return
 
         date_str = now.strftime("%Y-%m-%d")
@@ -801,7 +799,7 @@ class BossControlView(ui.View):
         view = EventBossSelectView(event_records)
         await interaction.followup.send("🎉 **Select an Event Boss to Activate:**", view=view, ephemeral=True)
 
-    @ui.button(label="Report Slain", style=discord.ButtonStyle.danger, emoji="☠️", custom_id="persistent_report_slain", row=1)
+    @ui.button(label="Report Slain", style=discord.ButtonStyle.danger, emoji="☠️️", custom_id="persistent_report_slain", row=1)
     async def report_slain_click(self, interaction: discord.Interaction, button: ui.Button):
         modal = KillModal(default_boss_name=self.boss_name)
         await interaction.response.send_modal(modal)
@@ -826,9 +824,8 @@ class BossControlView(ui.View):
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user.name}")
-    print("🚀 Boogeyman Boss Bot Premium ONLINE! (Queue Worker & Alert Loop Active)")
+    print("🚀 Boogeyman Boss Bot Premium ONLINE! (Queue Worker & High-Precision Alert Loop Active)")
 
-    # สั่งรัน Background Workers
     bot.loop.create_task(process_sheet_queue())
     
     if not check_boss_timers.is_running():
