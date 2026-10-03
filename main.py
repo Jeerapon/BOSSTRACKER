@@ -10,14 +10,21 @@ from google.oauth2.service_account import Credentials
 from keep_alive import keep_alive
 
 # ==========================================
-# 1. SETUP DISCORD BOT & TIMEZONE
+# 1. SETUP DISCORD BOT & CONFIGURATION
 # ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ⚠️ สำคัญมาก: นำ Channel ID ของช่องที่ต้องการให้ยิงเตือนมาใส่ตรงนี้
+# (คลิกขวาที่ชื่อช่องใน Discord -> Copy Channel ID)
+ALERT_CHANNEL_ID = 1505457051143241849  # <--- เปลี่ยนเป็น ID ช่องของคุณ (เป็นตัวเลข ไม่มีเครื่องหมายอัญประกาศ)
+
 # กำหนด Timezone ประเทศไทย (UTC+7)
 THAI_TZ = datetime.timezone(datetime.timedelta(hours=7))
+
+# บันทึกประวัติการเตือนเพื่อป้องกันการยิงข้อความซ้ำในนาทีเดียวกัน
+notified_bosses = set()
 
 # ==========================================
 # 2. GOOGLE SHEETS SETUP & ASYNC QUEUE
@@ -33,24 +40,21 @@ def init_gspread():
         creds_dict = json.loads(creds_json)
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPE)
     else:
-        # สำหรับ รันในเครื่อง local (ถ้ามีไฟล์ credentials.json)
         creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPE)
     client = gspread.authorize(creds)
     return client
 
 gc = init_gspread()
-# เปลี่ยนชื่อ Google Sheet ของคุณให้ตรงตรงนี้ (เช่น "ERICA5")
-sheet = gc.open("ERICA5").sheet1 
+sheet = gc.open("ERICA5").sheet1 # ตรวจสอบชื่อ Google Sheet ให้ถูกต้อง
 
-# คิวสำหรับเข้าแถวบันทึกข้อมูล ป้องกัน Rate Limit 429 Error
 sheet_queue = asyncio.Queue()
 
 async def sheet_worker():
-    """Worker คอยดึงงานจาก Queue ไปเขียนลง Google Sheets ทีละรายการ"""
+    """Worker คอยดึงงานไปเขียน/อ่าน Google Sheets ทีละคิว ป้องกัน Rate Limit 429 Error"""
     while True:
         task_func, args, kwargs, future = await sheet_queue.get()
         success = False
-        for attempt in range(3): # สั่ง Retry สูงสุด 3 ครั้งหากมีปัญหา
+        for attempt in range(3):
             try:
                 result = await asyncio.to_thread(task_func, *args, **kwargs)
                 if not future.done():
@@ -65,7 +69,7 @@ async def sheet_worker():
             future.set_exception(Exception("Failed to update Google Sheets after 3 retries."))
         
         sheet_queue.task_done()
-        await asyncio.sleep(1.2) # ชะลอเวลา 1.2 วินาที ป้องกัน Google API Block
+        await asyncio.sleep(1.2)
 
 async def add_to_sheet_queue(func, *args, **kwargs):
     loop = asyncio.get_running_loop()
@@ -76,60 +80,59 @@ async def add_to_sheet_queue(func, *args, **kwargs):
 # ==========================================
 # 3. BOSS ALERT TASK LOOP (แจ้งเตือนล่วงหน้า 1 นาที)
 # ==========================================
-# ช่องที่จะให้บอทยิงข้อความแจ้งเตือนบอส (จะถูกอัปเดตอัตโนมัติเมื่อรัน !setup)
-ALERT_CHANNEL_ID = None 
-
-# บันทึกบอสที่เตือนไปแล้ว ป้องกันการยิงเตือนซ้ำในนาทีเดียวกัน
-notified_bosses = set()
-
 @tasks.loop(seconds=30)
 async def check_boss_alerts():
-    """ตรวจสอบเวลาบอสจาก Google Sheets ทุกๆ 30 วินาที"""
     global ALERT_CHANNEL_ID, notified_bosses
-    if not ALERT_CHANNEL_ID:
+    if not ALERT_CHANNEL_ID or ALERT_CHANNEL_ID == 1234567890123456789:
+        print("[Alert Loop Warning] ยังไม่ได้ระบุ ALERT_CHANNEL_ID ที่ถูกต้อง")
         return
 
     try:
-        # อ่านข้อมูลจาก Sheet ผ่าน Queue Safe Function
         data = await add_to_sheet_queue(sheet.get_all_records)
         now_thai = datetime.datetime.now(THAI_TZ)
-        current_time_str = now_thai.strftime("%Y-%m-%d %H:%M")
+        current_time_str = now_thai.strftime("%H:%M") # เวลาปัจจุบัน (ชั่วโมง:นาที)
+        current_date_str = now_thai.strftime("%Y-%m-%d")
 
-        channel = bot.get_channel(ALERT_CHANNEL_ID)
+        channel = bot.get_channel(int(ALERT_CHANNEL_ID))
         if not channel:
+            print(f"[Alert Loop Error] หา Channel ID {ALERT_CHANNEL_ID} ไม่เจอ")
             return
 
         for row in data:
-            boss_name = row.get("Boss Name") or row.get("Boss")
-            date_str = str(row.get("Date", "")).strip()
-            time_str = str(row.get("Time", "")).strip()
+            boss_name = str(row.get("Boss Name") or row.get("Boss") or "").strip()
+            time_str = str(row.get("Time") or "").strip()
 
-            if not boss_name or not date_str or not time_str:
+            if not boss_name or not time_str:
                 continue
 
-            try:
-                # แปลงเวลาบอสเกิดเป็น datetime object
-                boss_time_str = f"{date_str} {time_str}"
-                boss_dt = datetime.datetime.strptime(boss_time_str, "%Y-%m-%d %H:%M").replace(tzinfo=THAI_TZ)
-                
-                # คำนวณเวลาเตือนล่วงหน้า 1 นาที
-                alert_dt = boss_dt - timedelta(minutes=1)
-                
-                # key สำหรับเช็กการเตือนซ้ำ
-                alert_key = f"{boss_name}_{boss_time_str}"
+            # แปลง Format เวลาใน Sheet ให้เป็น HH:MM เสมอ
+            time_parts = time_str.split(":")
+            if len(time_parts) >= 2:
+                formatted_boss_time = f"{int(time_parts[0]):02d}:{int(time_parts[1]):02d}"
+            else:
+                continue
 
-                # ถ้าเวลาปัจจุบันตรงกับเวลาแจ้งเตือน (หรือห่างไม่เกิน 1 นาที) และยังไม่เคยเตือน
-                if alert_dt.strftime("%Y-%m-%d %H:%M") == current_time_str and alert_key not in notified_bosses:
+            # คำนวณเวลาเตือนล่วงหน้า 1 นาที
+            try:
+                boss_dt = datetime.datetime.strptime(formatted_boss_time, "%H:%M")
+                alert_dt = boss_dt - timedelta(minutes=1)
+                alert_time_str = alert_dt.strftime("%H:%M")
+
+                alert_key = f"{boss_name}_{current_date_str}_{formatted_boss_time}"
+
+                # เช็กว่าเวลาปัจจุบัน ตรงกับ เวลาเตือนล่วงหน้า 1 นาที หรือไม่
+                if current_time_str == alert_time_str and alert_key not in notified_bosses:
                     embed = discord.Embed(
-                        title="⚔️ บอสใกล้จะเกิดแล้ว!",
-                        description=f"**{boss_name}** กำลังจะเกิดภายใน **1 นาที!**\n⏰ เวลาเกิด: `{time_str}` น.",
+                        title="⚔️ บอสกำลังจะเกิดแล้ว!",
+                        description=f"**{boss_name}** กำลังจะเกิดภายใน **1 นาที!**\n⏰ เวลาเกิด: `{formatted_boss_time}` น.",
                         color=discord.Color.red()
                     )
                     await channel.send(content="@here", embed=embed)
-                    notified_bosses.add(alert_key) # บันทึกว่าเตือนแล้ว
+                    notified_bosses.add(alert_key)
+                    print(f"✅ [SUCCESS] ยิงเตือนบอส {boss_name} (เกิด {formatted_boss_time}) เรียบร้อยแล้วที่เวลา {current_time_str}")
 
-            except ValueError:
-                continue # ข้ามกรณี Format เวลาใน Sheet ไม่ถูกต้อง
+            except Exception as parse_err:
+                continue
 
     except Exception as e:
         print(f"[Alert Loop Error]: {e}")
@@ -140,37 +143,36 @@ async def check_boss_alerts():
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user.name}")
-    print("🚀 Boogeyman Boss Bot Premium ONLINE! (Queue & Keep-Alive Ready)")
+    print("🚀 Boogeyman Boss Bot Premium ONLINE! (Queue & Alert Loop Active)")
     
-    # รัน Queue Worker
+    # รัน Queue Worker สำหรับ Google Sheets
     asyncio.create_task(sheet_worker())
     
-    # รัน Background Loop แจ้งเตือนบอส
+    # รัน Background Loop เช็กเวลาเตือนบอส
     if not check_boss_alerts.is_running():
         check_boss_alerts.start()
 
 @bot.command()
 async def setup(ctx):
-    """คำสั่งสำหรับตั้งค่าเปิดแผงควบคุมบอสและบันทึก Channel แจ้งเตือน"""
+    """คำสั่งสร้างแผงตารางควบคุมบอส"""
     global ALERT_CHANNEL_ID
-    ALERT_CHANNEL_ID = ctx.channel.id
+    ALERT_CHANNEL_ID = ctx.channel.id # อัปเดต ID ช่องอัตโนมัติเมื่อพิมพ์ !setup
     
     embed = discord.Embed(
         title="⚔️ ERICA5 LIVE BOSS SCHEDULE",
         description="กดปุ่มด้านล่างเพื่อทำการเคลมคะแนน / รายงานบอสถูกจัดการ",
         color=discord.Color.blue()
     )
-    
-    # หมายเหตุ: สามารถเพิ่ม View หรือ Button Components ของคุณต่อตรงนี้ได้
     await ctx.send(embed=embed)
+    print(f"📌 [Setup] บันทึก Channel ID แจ้งเตือนสำเร็จ: {ALERT_CHANNEL_ID}")
 
 # ==========================================
 # 5. MAIN EXECUTION
 # ==========================================
 if __name__ == "__main__":
-    keep_alive() # เปิด Flask Server รับ Ping จาก cron-job.org
+    keep_alive() # เปิด Web Server ให้ Cron-job ยิงสะกิดกันบอทหลับ
     TOKEN = os.getenv("DISCORD_TOKEN")
     if TOKEN:
         bot.run(TOKEN)
     else:
-        print("❌ Error: DISCORD_TOKEN Environment Variable is missing!")
+        print("❌ Error: ไม่พบ DISCORD_TOKEN ใน Environment Variables")
