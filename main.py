@@ -281,8 +281,15 @@ async def generate_score_report_embed():
     return await asyncio.to_thread(_generate_score_report_sync)
 
 # ---------------------------------------------------------
-# ⏰ 4. Timer Loop & Normal Boss Alert ( HIGH ACCURACY - 20s )
+# ⏰ 4. Timer Loop & Normal Boss Alert ( SAFE FROM RATE LIMIT )
 # ---------------------------------------------------------
+# 1. ลูปสำหรับอัปเดตตารางหลักบน Discord (รันทุกๆ 3 นาที ป้องกัน Discord 429 Error)
+@tasks.loop(minutes=3)
+async def auto_refresh_table_loop():
+    await bot.wait_until_ready()
+    await refresh_main_table()
+
+# 2. ลูปสำหรับเช็กเวลาเตือนบอส (รันทุกๆ 20 วินาที เช็กเวลาอย่างเดียว ไม่ edit ข้อความ)
 @tasks.loop(seconds=20)
 async def check_boss_timers():
     await bot.wait_until_ready()
@@ -309,7 +316,6 @@ async def check_boss_timers():
                 continue
 
             try:
-                # ดึงเวลาเฉพาะ HH:MM
                 time_str = boss_up.split(" ")[-1][:5]
                 b_hour, b_min = map(int, time_str.split(":"))
                 
@@ -317,10 +323,8 @@ async def check_boss_timers():
                 if boss_dt < now_thai - timedelta(minutes=10):
                     boss_dt += timedelta(days=1)
 
-                # คำนวณความต่างของเวลาเป็นวินาที
                 diff_seconds = (boss_dt - now_thai).total_seconds()
 
-                # แจ้งเตือนเมื่อบอสจะเกิดในอีก 0 ถึง 90 วินาที (ล่วงหน้าประมาณ 1 นาที)
                 if 0 <= diff_seconds <= 90:
                     stage_key = f"{boss_up}_{current_date_str}_{time_str}"
 
@@ -342,7 +346,7 @@ async def check_boss_timers():
                         await channel.send(content="@everyone", embed=alert_embed, view=view)
                         print(f"✅ Alert sent for {name} (Spawn at {time_str})")
 
-            except Exception as parse_err:
+            except Exception:
                 continue
 
     except Exception as e:
@@ -503,7 +507,7 @@ class EventBossControlView(ui.View):
         for rec in score_records:
             if str(rec.get("USER ID")) == user_id and str(rec.get("BOSS NAME")).lower() == self.boss_name.lower():
                 if str(rec.get("DATE")) == today_str:
-                    await interaction.followup.send("⚠️️ You have already claimed points for this Event Boss!", ephemeral=True)
+                    await interaction.followup.send("⚠️ You have already claimed points for this Event Boss!", ephemeral=True)
                     return
 
         date_str = now.strftime("%Y-%m-%d")
@@ -799,7 +803,7 @@ class BossControlView(ui.View):
         view = EventBossSelectView(event_records)
         await interaction.followup.send("🎉 **Select an Event Boss to Activate:**", view=view, ephemeral=True)
 
-    @ui.button(label="Report Slain", style=discord.ButtonStyle.danger, emoji="☠️️", custom_id="persistent_report_slain", row=1)
+    @ui.button(label="Report Slain", style=discord.ButtonStyle.danger, emoji="☠️", custom_id="persistent_report_slain", row=1)
     async def report_slain_click(self, interaction: discord.Interaction, button: ui.Button):
         modal = KillModal(default_boss_name=self.boss_name)
         await interaction.response.send_modal(modal)
@@ -828,6 +832,9 @@ async def on_ready():
 
     bot.loop.create_task(process_sheet_queue())
     
+    if not auto_refresh_table_loop.is_running():
+        auto_refresh_table_loop.start()
+
     if not check_boss_timers.is_running():
         check_boss_timers.start()
 
