@@ -87,7 +87,7 @@ async def execute_sheet_write_with_retry(func, *args, max_retries=3):
         try:
             return await asyncio.to_thread(func, *args)
         except Exception as e:
-            print(f"⚠️ Google Sheet write error (Attempt {attempt}/{max_retries}): {e}")
+            print(f"⚠️️ Google Sheet write error (Attempt {attempt}/{max_retries}): {e}")
             if attempt == max_retries:
                 raise e
             await asyncio.sleep(1.5 * attempt)
@@ -223,6 +223,11 @@ async def refresh_main_table(interaction_or_channel=None):
             await interaction_or_channel.message.edit(embeds=new_embeds)
         elif main_setup_message: 
             await main_setup_message.edit(embeds=new_embeds)
+    except discord.errors.HTTPException as http_err:
+        if http_err.status == 429:
+            retry_after = getattr(http_err, 'retry_after', 5)
+            print(f"⚠️ Discord Rate Limit hit in refresh_main_table. Retrying in {retry_after}s...")
+            await asyncio.sleep(retry_after)
     except Exception as e:
         print(f"Failed to refresh main table: {e}")
 
@@ -281,15 +286,15 @@ async def generate_score_report_embed():
     return await asyncio.to_thread(_generate_score_report_sync)
 
 # ---------------------------------------------------------
-# ⏰ 4. Timer Loop & Normal Boss Alert ( SAFE FROM RATE LIMIT )
+# ⏰ 4. Timer Loops (SAFE FROM RATE LIMIT)
 # ---------------------------------------------------------
-# 1. ลูปสำหรับอัปเดตตารางหลักบน Discord (รันทุกๆ 3 นาที ป้องกัน Discord 429 Error)
+# 1. ลูปอัปเดตตารางหลักบน Discord (รันทุกๆ 3 นาที ป้องกัน Discord 429 Error)
 @tasks.loop(minutes=3)
 async def auto_refresh_table_loop():
     await bot.wait_until_ready()
     await refresh_main_table()
 
-# 2. ลูปสำหรับเช็กเวลาเตือนบอส (รันทุกๆ 20 วินาที เช็กเวลาอย่างเดียว ไม่ edit ข้อความ)
+# 2. ลูปเช็กเวลาเตือนบอส (รันทุกๆ 20 วินาที เช็กเวลาอย่างเดียว)
 @tasks.loop(seconds=20)
 async def check_boss_timers():
     await bot.wait_until_ready()
@@ -343,8 +348,16 @@ async def check_boss_timers():
                         alert_embed.set_footer(text="🎯 Position at spawn point and click 'Claim Point' upon defeating the boss!")
 
                         view = BossControlView(boss_name=name)
-                        await channel.send(content="@everyone", embed=alert_embed, view=view)
-                        print(f"✅ Alert sent for {name} (Spawn at {time_str})")
+                        
+                        try:
+                            await channel.send(content="@everyone", embed=alert_embed, view=view)
+                            print(f"✅ Alert sent for {name} (Spawn at {time_str})")
+                        except discord.errors.HTTPException as http_err:
+                            if http_err.status == 429:
+                                retry_after = getattr(http_err, 'retry_after', 5)
+                                print(f"⚠️ Rate limited during alert. Waiting {retry_after}s...")
+                                await asyncio.sleep(retry_after)
+                                await channel.send(content="@everyone", embed=alert_embed, view=view)
 
             except Exception:
                 continue
@@ -390,7 +403,7 @@ class ConfirmClaimModal(ui.Modal, title="Confirm Boss Point Claim"):
         for rec in score_records:
             if str(rec.get("USER ID")) == user_id and str(rec.get("BOSS NAME")).lower() == self.boss_name.lower():
                 if str(rec.get("DATE")) == today_str:
-                    await interaction.followup.send("⚠️️ You have already claimed points for this boss spawn cycle!", ephemeral=True)
+                    await interaction.followup.send("⚠️ You have already claimed points for this boss spawn cycle!", ephemeral=True)
                     return
 
         date_str = now.strftime("%Y-%m-%d")
@@ -470,7 +483,7 @@ class EventBossSelect(ui.Select):
         )
         event_embed.add_field(name="⚔️ Event Boss", value=f"`{boss_name}`", inline=True)
         event_embed.add_field(name="🎁 Reward Point", value=f"`+{pts_val} pts`", inline=True)
-        event_embed.add_field(name="⚠ Absence Penalty", value=f"`{penalty_val} pts`", inline=True)
+        event_embed.add_field(name="⚠️ Absence Penalty", value=f"`{penalty_val} pts`", inline=True)
         event_embed.set_footer(text=f"Activated by: {interaction.user.display_name} • Click 'Claim Event Point' before event closes!")
 
         view = EventBossControlView(boss_name=boss_name, reward_pts=pts_val, penalty_pts=penalty_val)
@@ -828,7 +841,7 @@ class BossControlView(ui.View):
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user.name}")
-    print("🚀 Boogeyman Boss Bot Premium ONLINE! (Queue Worker & High-Precision Alert Loop Active)")
+    print("🚀 ERICA5 Boss Bot ONLINE! (Queue Worker & Rate-Limit Safe Alert Loop Active)")
 
     bot.loop.create_task(process_sheet_queue())
     
